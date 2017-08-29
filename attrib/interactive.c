@@ -52,8 +52,10 @@
 
 static GIOChannel *iochannel = NULL;
 static GAttrib *attrib = NULL;
+static GMainContext* con1 = NULL;
 static GMainLoop *event_loop;
 static GString *prompt;
+static GSource* source1 = NULL;
 
 static char *opt_src = NULL;
 static char *opt_dst = NULL;
@@ -72,6 +74,17 @@ static enum state {
 	STATE_CONNECTED
 } conn_state;
 
+typedef enum pstate {
+	PSTATE_DISCONNECTED,
+	PSTATE_CONNECTING,
+	PSTATE_CONNECTED,
+	PSTATE_READ,
+	PSTATE_WRITE,
+	PSTATE_DISCONNECTING,
+	PSTATE_SCANNING,
+	PSTATE_ERROR,
+} proc_state;
+static proc_state pState = PSTATE_DISCONNECTED;
 #define error(fmt, arg...) \
 	rl_printf(COLOR_RED "Error: " COLOR_OFF fmt, ## arg)
 
@@ -155,7 +168,7 @@ static void connect_cb(GIOChannel *io, GError *err, gpointer user_data)
 {
 	uint16_t mtu;
 	uint16_t cid;
-
+	rl_printf("Connection CB\n");
 	if (err) {
 		set_state(STATE_DISCONNECTED);
 		error("%s\n", err->message);
@@ -411,7 +424,7 @@ static void cmd_connect(int argcp, char **argvp)
 					opt_psm, opt_mtu, connect_cb, &gerr);
 	if (iochannel == NULL) {
 		set_state(STATE_DISCONNECTED);
-		error("%s\n", gerr->message);
+		error("%error s\n", gerr->message);
 		g_error_free(gerr);
 	} else
 		g_io_add_watch(iochannel, G_IO_HUP, channel_watcher, NULL);
@@ -990,6 +1003,125 @@ static guint setup_signalfd(void)
 	return source;
 }
 
+
+static void accept_state(proc_state state)
+{
+    switch (state)
+    {
+    case PSTATE_DISCONNECTED:
+    				{
+
+    				}
+    				break;
+    		case PSTATE_CONNECTING:
+    				{
+
+    				}
+    				break;
+    		case PSTATE_CONNECTED:
+    				{
+
+    				}
+    				break;
+    		case PSTATE_READ:
+    				{
+
+    				}
+    				break;
+    		case PSTATE_WRITE:
+    				{
+
+    				}
+    				break;
+    		case PSTATE_DISCONNECTING:
+    				{
+
+    				}
+    				break;
+    		case PSTATE_SCANNING:
+    				{
+
+    				}
+    				break;
+    		case PSTATE_ERROR:
+    				{
+
+    				}
+    				break;
+    		default: break;
+    		}
+}
+static void bt_process(void)
+{GError *err = NULL;
+	switch(pState){
+		case PSTATE_DISCONNECTED:
+				{
+					cmd_connect(1,NULL);
+					pState = PSTATE_CONNECTING;
+					accept_state(pState);
+				}
+				break;
+		case PSTATE_CONNECTING:
+				{
+					if(conn_state == STATE_CONNECTED){
+						pState = PSTATE_CONNECTED;
+					}
+					else{
+						connect_cb(iochannel,err,NULL);
+								if(err){
+									conn_state = STATE_DISCONNECTED;
+									pState = PSTATE_ERROR;
+								}
+					}
+					accept_state(pState);
+				}
+				break;
+		case PSTATE_CONNECTED:
+				{
+					cmd_char(1,NULL);
+					accept_state(pState);
+				}
+				break;
+		case PSTATE_READ:
+				{
+					accept_state(pState);
+				}
+				break;
+		case PSTATE_WRITE:
+				{
+					accept_state(pState);
+				}
+				break;
+		case PSTATE_DISCONNECTING:
+				{
+					accept_state(pState);
+				}
+				break;
+		case PSTATE_SCANNING:
+				{
+					accept_state(pState);
+				}
+				break;
+		case PSTATE_ERROR:
+				{
+					accept_state(pState);
+				}
+				break;
+		default: break;
+		}
+	}
+static gboolean timer_callback(gpointer data)
+{
+ // static guint16 i=0;
+ // g_print("St=%d, Co=%d\n",pState,conn_state);
+  bt_process();
+ /* if(i%5==0){
+    g_print("try to stop loop1\n", data);
+    g_main_loop_quit((GMainLoop*)data);
+  }*/
+  return TRUE;
+}
+
 int interactive(const char *src, const char *dst,
 		const char *dst_type, int psm)
 {
@@ -1002,10 +1134,13 @@ int interactive(const char *src, const char *dst,
 	opt_dst = g_strdup(dst);
 	opt_dst_type = g_strdup(dst_type);
 	opt_psm = psm;
-
+	g_print("int_code0\n");
 	prompt = g_string_new(NULL);
-
-	event_loop = g_main_loop_new(NULL, FALSE);
+	con1 = g_main_context_new ();
+	event_loop = g_main_loop_new(con1, FALSE);
+	source1 = g_timeout_source_new(200);
+	g_source_set_callback (source1, timer_callback, event_loop, NULL);
+	g_source_attach (source1, con1);
 
 	input = setup_standard_input();
 	signal = setup_signalfd();
@@ -1013,10 +1148,24 @@ int interactive(const char *src, const char *dst,
 	rl_attempted_completion_function = commands_completion;
 	rl_erase_empty_line = 1;
 	rl_callback_handler_install(get_prompt(), parse_line);
+	g_print("int_code1\n");
+	while(1)
+	{
+		bt_process();
+	}
 
 	g_main_loop_run(event_loop);
+	// We don't need the GMainContext anymore—the loop has an internal
+	  // reference so we'll drop ours.
+	  g_main_context_unref (con1);
+	  con1 = NULL;
 
+	  // Ditto for the GSource
+	  g_source_unref (source1);
+	  source1 = NULL;
+	g_print("int_code2\n");
 	rl_callback_handler_remove();
+	g_print("int_code3\n");
 	cmd_disconnect(0, NULL);
 	g_source_remove(input);
 	g_source_remove(signal);
@@ -1029,3 +1178,6 @@ int interactive(const char *src, const char *dst,
 
 	return 0;
 }
+
+
+

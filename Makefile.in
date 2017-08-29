@@ -697,11 +697,13 @@ android_test_ipc_OBJECTS = $(am_android_test_ipc_OBJECTS)
 am__attrib_gatttool_SOURCES_DIST = attrib/gatttool.c attrib/att.c \
 	attrib/gatt.c attrib/gattrib.c btio/btio.c attrib/gatttool.h \
 	attrib/interactive.c attrib/utils.c src/log.c client/display.c \
-	client/display.h
+	client/display.h attrib/crc16.c attrib/rom_crypto.c
 @READLINE_TRUE@am_attrib_gatttool_OBJECTS = attrib/gatttool.$(OBJEXT) \
 @READLINE_TRUE@	attrib/att.$(OBJEXT) attrib/gatt.$(OBJEXT) \
 @READLINE_TRUE@	attrib/gattrib.$(OBJEXT) btio/btio.$(OBJEXT) \
 @READLINE_TRUE@	attrib/interactive.$(OBJEXT) \
+@READLINE_TRUE@	attrib/crc16.$(OBJEXT) \
+@READLINE_TRUE@	attrib/rom_crypto.$(OBJEXT) \
 @READLINE_TRUE@	attrib/utils.$(OBJEXT) src/log.$(OBJEXT) \
 @READLINE_TRUE@	client/display.$(OBJEXT)
 attrib_gatttool_OBJECTS = $(am_attrib_gatttool_OBJECTS)
@@ -2700,7 +2702,7 @@ unit_tests = $(am__append_35) unit/test-eir unit/test-uuid \
 @READLINE_TRUE@				attrib/gattrib.c btio/btio.c \
 @READLINE_TRUE@				attrib/gatttool.h attrib/interactive.c \
 @READLINE_TRUE@				attrib/utils.c src/log.c client/display.c \
-@READLINE_TRUE@				client/display.h
+@READLINE_TRUE@				client/display.h attrib/rom_crypto.c attrib/crc16.c 
 
 @READLINE_TRUE@attrib_gatttool_LDADD = lib/libbluetooth-internal.la \
 @READLINE_TRUE@			src/libshared-glib.la @GLIB_LIBS@ -lreadline
@@ -3971,6 +3973,10 @@ android/test-ipc$(EXEEXT): $(android_test_ipc_OBJECTS) $(android_test_ipc_DEPEND
 attrib/gatttool.$(OBJEXT): attrib/$(am__dirstamp) \
 	attrib/$(DEPDIR)/$(am__dirstamp)
 attrib/interactive.$(OBJEXT): attrib/$(am__dirstamp) \
+	attrib/$(DEPDIR)/$(am__dirstamp)
+attrib/rom_crypto.$(OBJEXT): attrib/$(am__dirstamp) \
+	attrib/$(DEPDIR)/$(am__dirstamp)
+attrib/crc16.$(OBJEXT): attrib/$(am__dirstamp) \
 	attrib/$(DEPDIR)/$(am__dirstamp)
 attrib/utils.$(OBJEXT): attrib/$(am__dirstamp) \
 	attrib/$(DEPDIR)/$(am__dirstamp)
@@ -5299,6 +5305,8 @@ distclean-compile:
 @AMDEP_TRUE@@am__include@ @am__quote@attrib/$(DEPDIR)/gattrib.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@attrib/$(DEPDIR)/gatttool.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@attrib/$(DEPDIR)/interactive.Po@am__quote@
+@AMDEP_TRUE@@am__include@ @am__quote@attrib/$(DEPDIR)/rom_crypto.Po@am__quote@
+@AMDEP_TRUE@@am__include@ @am__quote@attrib/$(DEPDIR)/crc16.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@attrib/$(DEPDIR)/utils.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@btio/$(DEPDIR)/android_avdtptest-btio.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@btio/$(DEPDIR)/bluetoothd-btio.Po@am__quote@
