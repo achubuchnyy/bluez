@@ -21,6 +21,17 @@
  *
  */
 
+#define	DISCONNECTED_TIMEOUT 2
+#define	CONNECTING_TIMEOUT 4
+#define	CONNECTED_TIMEOUT 2
+#define	DISCOWERING_PRIME_TIMEOUT 2
+#define	DISCOWERING_CHAR_TIMEOUT 2
+#define	READ_TIMEOUT 4
+#define	WRITE_TIMEOUT 4
+#define	DISCONNECTING_TIMEOUT 2
+#define	SCANNING_TIMEOUT 0
+#define	ERROR_TIMEOUT 0
+
 int interactive(const char *src, const char *dst, const char *dst_type,
 								int psm);
 GIOChannel *gatt_connect(const char *src, const char *dst,

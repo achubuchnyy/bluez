@@ -20,8 +20,7 @@
  *  along with this program; if not, write to the Free Software
  *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  *
- */
-/*
+
  * nohup ./gatttool -i hci0 -t random > /dev/null 2>&1 &
  *
  * kill 5198
@@ -102,23 +101,22 @@ static uint32_t rx_count = 0;
 static uint32_t tx_count = 0;
 static gboolean rx_error = FALSE;
 static gboolean tx_error = FALSE;
+static char address[18];
+static char str_uuid[36];
 struct characteristic_data {
 	GAttrib *attrib;
 	uint16_t start;
 	uint16_t end;
 };
 
-static enum state {
-	STATE_DISCONNECTED,
-	STATE_CONNECTING,
-	STATE_CONNECTED,
-	STATE_ERROR
-} conn_state;
+
 
 typedef enum pstate {
 	PSTATE_DISCONNECTED,
 	PSTATE_CONNECTING,
 	PSTATE_CONNECTED,
+	PSTATE_DISCOWERING_PRIME,
+	PSTATE_DISCOWERING_CHAR,
 	PSTATE_READ,
 	PSTATE_WRITE,
 	PSTATE_DISCONNECTING,
@@ -126,15 +124,7 @@ typedef enum pstate {
 	PSTATE_ERROR,
 } proc_state;
 
-typedef enum perror {
-	ERROR_DISCONNECTED,
-	ERROR_CONNECTING,
-	ERROR_CONNECTED,
-	ERROR_READ,
-	ERROR_WRITE,
-	ERROR_DISCONNECTING,
-	ERROR_SCANNING,
-} proc_error;
+
 
 static proc_state pState = PSTATE_DISCONNECTED;
 
@@ -143,7 +133,7 @@ static gboolean characteristics(gpointer user_data);
 static gboolean characteristics_read(gpointer user_data);
 static gboolean characteristics_write_req(gpointer user_data);
 static gboolean bt_process(gpointer data);
-
+static void reload_process(void);
 
 static void events_handler(const uint8_t *pdu, uint16_t len, gpointer user_data)
 {
@@ -195,7 +185,7 @@ static gboolean listen_start(gpointer user_data)
 
 static void disconnect_io(void)
 {
-	if (conn_state == STATE_DISCONNECTED)
+	if (pState == PSTATE_DISCONNECTED)
 		return;
 
 	g_attrib_unref(Attrib);
@@ -206,7 +196,7 @@ static void disconnect_io(void)
 	g_io_channel_unref(chan);
 	chan = NULL;
 
-	conn_state = STATE_DISCONNECTED;
+	pState = PSTATE_DISCONNECTED;
 }
 
 static void connect_cb(GIOChannel *io, GError *err, gpointer user_data)
@@ -216,11 +206,19 @@ static void connect_cb(GIOChannel *io, GError *err, gpointer user_data)
 	uint16_t cid;
 	GError *gerr = NULL;
 
+if (pState != PSTATE_CONNECTING)
+{
+	pState = PSTATE_ERROR;
+	return;
+}
 
 	if (err) {
 		g_printerr("%s\n", err->message);
 		got_error = TRUE;
-		g_main_loop_quit(event_loop);
+		//g_main_loop_quit(event_loop);
+		pState = PSTATE_ERROR;
+				return;
+
 	}
 
 	bt_io_get(io, &gerr, BT_IO_OPT_IMTU, &mtu,
@@ -241,6 +239,7 @@ static void connect_cb(GIOChannel *io, GError *err, gpointer user_data)
 	if (opt_listen)
 		g_idle_add(listen_start, attrib);
 Attrib=attrib;
+pState = PSTATE_CONNECTED;
 	operation(attrib);
 }
 
@@ -272,8 +271,10 @@ static void primary_by_uuid_cb(uint8_t status, GSList *ranges, gpointer *user_da
 	if (status != 0) {
 		g_printerr("Discover primary services by UUID failed: %s\n",
 							att_ecode2str(status));
-		g_main_loop_quit(event_loop);
+		pState = PSTATE_ERROR;
+				return;
 	}
+	pState = PSTATE_DISCOWERING_PRIME;
 	g_print("primary_by_uuid_cb\n");
 	for (l = ranges; l; l = l->next) {
 		struct att_range *range = l->data;
@@ -295,7 +296,7 @@ char struuid[40];
 
 		gatt_discover_primary(attrib, &charge_uuid, primary_by_uuid_cb,
 									NULL);
-
+		pState = PSTATE_DISCOWERING_PRIME;
 	}
 	else{
 		gatt_discover_primary(attrib, NULL, primary_all_cb, NULL);
@@ -313,9 +314,10 @@ static void char_discovered_cb(uint8_t status, GSList *characteristics,
 	if (status) {
 		g_printerr("Discover all characteristics failed: %s\n",
 							att_ecode2str(status));
-		g_main_loop_quit(event_loop);
+		pState = PSTATE_ERROR;
+		return;
 	}
-
+	pState = PSTATE_DISCOWERING_CHAR;
 	for (l = characteristics; l; l = l->next) {
 		struct gatt_char *chars = l->data;
 
@@ -342,6 +344,7 @@ static gboolean characteristics(gpointer user_data)
 
 	gatt_discover_char(attrib, opt_start, opt_end, NULL,
 						char_discovered_cb, NULL);
+	pState = PSTATE_DISCOWERING_CHAR;
 	operation = characteristics_read;
 	return FALSE;
 }
@@ -358,6 +361,8 @@ static void char_read_cb(guint8 status, const guint8 *pdu, guint16 plen,
 							att_ecode2str(status));
 		//g_main_loop_quit(event_loop);
 		rx_error = TRUE;
+		pState = PSTATE_ERROR;
+				return;
 	}
 
 	vlen = dec_read_resp(pdu, plen, value, sizeof(value));
@@ -365,6 +370,8 @@ static void char_read_cb(guint8 status, const guint8 *pdu, guint16 plen,
 		g_printerr("Protocol error\n");
 		//g_main_loop_quit(event_loop);
 		rx_error = TRUE;
+		pState = PSTATE_ERROR;
+				return;
 	}
 
 	memcpy(char_value,value,vlen);
@@ -379,11 +386,13 @@ static void char_read_cb(guint8 status, const guint8 *pdu, guint16 plen,
 	if(checkCRC16((uint8_t*)&decr_data[0],16)==1){
 		g_print(" :CRC OK\n");
 		rx_count++;
+		pState = PSTATE_READ;
 	}else
 	{
 		rx_error = TRUE;
 		g_print( " :CRC not valid\r\n");
-
+		pState = PSTATE_ERROR;
+				return;
 	}
 
 	opt_value=char_value;
@@ -400,10 +409,12 @@ static gboolean characteristics_read(gpointer user_data)
 	if (opt_handle <= 0) {
 		g_printerr("A valid handle is required\n");
 		g_main_loop_quit(event_loop);
+		pState = PSTATE_ERROR;
 		return FALSE;
 	}
 
 	gatt_read_char(attrib, opt_handle, char_read_cb, attrib);
+	pState = PSTATE_READ;
 	operation = characteristics_write_req;
 	return FALSE;
 }
@@ -455,17 +466,21 @@ static void char_write_req_cb(guint8 status, const guint8 *pdu, guint16 plen,
 		g_printerr("Characteristic Write Request failed: "
 						"%s\n", att_ecode2str(status));
 		tx_error = TRUE;
-		g_main_loop_quit(event_loop);
+		//g_main_loop_quit(event_loop);
+		pState = PSTATE_ERROR;
+		return;
 	}
 
 	if (!dec_write_resp(pdu, plen) && !dec_exec_write_resp(pdu, plen)) {
 		g_printerr("Protocol error\n");
-		g_main_loop_quit(event_loop);
+		//g_main_loop_quit(event_loop);
+		pState = PSTATE_ERROR;
+				return;
 	}
 
 	tx_count++;
 	//g_print("Characteristic value was written successfully\n");
-
+	pState = PSTATE_WRITE;
 	operation(Attrib);
 
 
@@ -480,7 +495,9 @@ static gboolean characteristics_write_req(gpointer user_data)
 
 	if (opt_handle <= 0) {
 		g_printerr("A valid handle is required\n");
-		goto error;
+		pState = PSTATE_ERROR;
+		return FALSE;
+		//goto error;
 	}
 
 	uint16_t crc = crc16_clc((uint8_t*)&data_to_write[0], 14);
@@ -491,12 +508,13 @@ static gboolean characteristics_write_req(gpointer user_data)
 
 	gatt_write_char(attrib, opt_handle, encr_data, 19, char_write_req_cb,
 									NULL);
+	pState = PSTATE_WRITE;
 	operation = characteristics_read;
 	return FALSE;
 
-error:
+/*error:
 	g_main_loop_quit(event_loop);
-	return FALSE;
+	return FALSE;*/
 }
 
 static void char_desc_cb(uint8_t status, GSList *descriptors, void *user_data)
@@ -506,6 +524,7 @@ static void char_desc_cb(uint8_t status, GSList *descriptors, void *user_data)
 	if (status) {
 		g_printerr("Discover descriptors failed: %s\n",
 							att_ecode2str(status));
+		pState = PSTATE_ERROR;
 		return;
 	}
 
@@ -548,13 +567,15 @@ static gboolean parse_uuid(const char *key, const char *value,
 
 static void connect_le(void)
 {GError *gerr = NULL;
-	if (conn_state == STATE_CONNECTING)
+	if (pState == PSTATE_CONNECTING)
 	{
+		pState = PSTATE_ERROR;
 		return;
 	}
 	if (opt_dst == NULL) {
 		g_print("Remote Bluetooth address required\n");
 		got_error = TRUE;
+		pState = PSTATE_ERROR;
 		return;
 		}
 
@@ -565,9 +586,11 @@ static void connect_le(void)
 		g_printerr("%s\n", gerr->message);
 		g_clear_error(&gerr);
 		got_error = TRUE;
+		pState = PSTATE_ERROR;
 		return ;
 		}
-	conn_state = STATE_CONNECTING;
+
+	pState = PSTATE_CONNECTING;
 }
 
 static GOptionEntry primary_char_options[] = {
@@ -629,7 +652,7 @@ static gboolean timer_callback(gpointer data)
 {
   static guint16 i=0;
   g_print("RX=%d ;TX=%d\n",rx_count, tx_count);
-  bt_process();
+ // bt_process();
   return TRUE;
 }
 
@@ -640,8 +663,7 @@ int main(int argc, char *argv[])
 	GOptionGroup *gatt_group, *params_group, *char_rw_group;
 	GError *gerr = NULL;
 
-	char address[18];
-	char str_uuid[36];
+
 
 	static uint128_t charge_base_uuid = {
 		.data = {	0x77, 0xb7, 0xa4, 0x20, 0x59, 0x48, 0x11, 0xe6, 0xbd, 0xf4, 0x08, 0x00, 0x20, 0x0c, 0x9a, 0x66 }
@@ -649,18 +671,10 @@ int main(int argc, char *argv[])
 
 	charge_uuid.value.u128 = charge_base_uuid;
 	charge_uuid.type = BT_UUID128;
-	/*Scanning for Smartphone*/
-	get_smartphone_address(address);
 
-	/*init params for connection*/
-	opt_src = g_strdup("hci0");
-	opt_dst_type = g_strdup("random");
-	opt_sec_level = g_strdup("low");
-	bt_uuid_to_string(&charge_uuid,&str_uuid[0],36);
 
-	opt_uuid = &charge_uuid;
 
-	opt_dst = &address[0];
+
 	context = g_option_context_new(NULL);
 	g_option_context_add_main_entries(context, options, NULL);
 
@@ -698,7 +712,14 @@ int main(int argc, char *argv[])
 		goto done;
 	}
 
-
+	if (!system("/usr/bin/hciconfig hci0 up")){
+			g_print("hciconfig hci0 up\n");
+		/*Scanning for Smartphone*/
+			reload_process();
+		}else{
+			g_print("filed hci0 up\n");
+		}
+/*
 	if (opt_primary)
 		operation = primary;
 	else if (opt_characteristics)
@@ -721,7 +742,7 @@ int main(int argc, char *argv[])
 
 
 
-	connect_le();
+	connect_le();*/
 
 // Periodic timeout event init
 	g_timeout_add (1000,bt_process,NULL);
@@ -747,49 +768,111 @@ done:
 }
 
 
+static void reload_process(void)
+{
+	get_smartphone_address(address);
+
+	/*init params for connection*/
+	opt_src = g_strdup("hci0");
+	opt_dst_type = g_strdup("random");
+	opt_sec_level = g_strdup("low");
+	bt_uuid_to_string(&charge_uuid,&str_uuid[0],36);
+
+	opt_uuid = &charge_uuid;
+
+	opt_dst = &address[0];
+	operation = primary;
+	connect_le();
+}
+#define  RESET_TIMEOUTS	 \
+			disconnected_timeout = 0; \
+			connecting_timeout = 0; \
+			connected_timeout = 0; \
+			disc_prime_timeout = 0; \
+			disc_char_timeout = 0; \
+			rxtx_timeout = 0;
 
 static void accept_state(proc_state state)
 {
-    switch (state)
+	static uint8_t disconnected_timeout = 0;
+	static uint8_t connecting_timeout = 0;
+	static uint8_t connected_timeout = 0;
+	static uint8_t disc_prime_timeout = 0;
+	static uint8_t disc_char_timeout = 0;
+	static uint8_t rxtx_timeout = 0;
+	g_print("State =%d\n",pState);
+    switch (pState)
     {
     case PSTATE_DISCONNECTED:
     				{
+
+    					reload_process();
 
     				}
     				break;
     		case PSTATE_CONNECTING:
     				{
-
+    					if(CONNECTING_TIMEOUT<=connecting_timeout++){
+    						pState = PSTATE_ERROR;
+    						RESET_TIMEOUTS
+    					}
     				}
     				break;
     		case PSTATE_CONNECTED:
     				{
-
+    					if(CONNECTED_TIMEOUT<=connected_timeout++){
+    						pState = PSTATE_ERROR;
+    						RESET_TIMEOUTS
+    					}
+    				}
+    				break;
+    		case PSTATE_DISCOWERING_PRIME:
+    				{
+    					if(DISCOWERING_PRIME_TIMEOUT<=disc_prime_timeout++){
+    						pState = PSTATE_ERROR;
+    					    RESET_TIMEOUTS
+    					  }
+    				}
+    				break;
+    		case PSTATE_DISCOWERING_CHAR:
+    				{
+    					if(DISCOWERING_CHAR_TIMEOUT<=disc_char_timeout++){
+    						pState = PSTATE_ERROR;
+    					    RESET_TIMEOUTS
+    					  }
     				}
     				break;
     		case PSTATE_READ:
     				{
-
+    					if(READ_TIMEOUT<=rxtx_timeout++){
+    						pState = PSTATE_ERROR;
+    					    RESET_TIMEOUTS
+    					  }
     				}
     				break;
     		case PSTATE_WRITE:
     				{
-
+    					if(READ_TIMEOUT<=rxtx_timeout++){
+    						pState = PSTATE_ERROR;
+    					    RESET_TIMEOUTS
+    					  }
     				}
     				break;
     		case PSTATE_DISCONNECTING:
     				{
-
+    					RESET_TIMEOUTS
     				}
     				break;
     		case PSTATE_SCANNING:
     				{
-
+    					RESET_TIMEOUTS
     				}
     				break;
     		case PSTATE_ERROR:
     				{
-
+    					RESET_TIMEOUTS
+    					pState = PSTATE_DISCONNECTING;
+    					disconnect_io();
     				}
     				break;
     		default: break;
@@ -797,62 +880,9 @@ static void accept_state(proc_state state)
 }
 static gboolean bt_process(gpointer data)
 {GError *err = NULL;
-	switch(pState){
-		case PSTATE_DISCONNECTED:
-				{
-					cmd_connect(1,NULL);
-					pState = PSTATE_CONNECTING;
-					accept_state(pState);
-				}
-				break;
-		case PSTATE_CONNECTING:
-				{
-					if(conn_state == STATE_CONNECTED){
-						pState = PSTATE_CONNECTED;
-					}
-					else{
-						connect_cb(iochannel,err,NULL);
-								if(err){
-									conn_state = STATE_DISCONNECTED;
-									pState = PSTATE_ERROR;
-								}
-					}
-					accept_state(pState);
-				}
-				break;
-		case PSTATE_CONNECTED:
-				{
-					cmd_char(1,NULL);
-					accept_state(pState);
-				}
-				break;
-		case PSTATE_READ:
-				{
-					accept_state(pState);
-				}
-				break;
-		case PSTATE_WRITE:
-				{
-					accept_state(pState);
-				}
-				break;
-		case PSTATE_DISCONNECTING:
-				{
-					accept_state(pState);
-				}
-				break;
-		case PSTATE_SCANNING:
-				{
-					accept_state(pState);
-				}
-				break;
-		case PSTATE_ERROR:
-				{
-					accept_state(pState);
-				}
-				break;
-		default: break;
-		}
+
+	accept_state(pState);
+return TRUE;
 	}
 static bool validate_ble_dev(char* dev_public_key)
 {
@@ -886,7 +916,7 @@ static int get_smartphone_address(char* address)
   int i;
   int scanning = 0;
   int8_t rssi;
-
+  pState = PSTATE_SCANNING;
   memset(&hciDevInfo, 0x00, sizeof(hciDevInfo));
 
 
