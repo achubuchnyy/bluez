@@ -25,6 +25,8 @@
  * nohup ./gatttool -i hci0 -t random > /dev/null 2>&1 &
  *
  * kill 5198
+ *
+ * 4.1.15-6UL+g53cf595 #1 SMP PREEMPT Fri Aug 25 09:37:35 MSK 2017 armv7l armv7l armv7l GNU/Linux
  * */
 #ifdef HAVE_CONFIG_H
 #include <config.h>
@@ -90,26 +92,58 @@ static GSourceFunc operation;
 static GIOChannel *chan = NULL;
 static GAttrib *Attrib = NULL;
 static char str_char_uuid[37] ="77b7a422-5948-11e6-bdf4-0800200c9a66";
-static uint8_t aes_key[16] = {0xf6,0x7f,0x7a,0x52,0x4d,0x55,0x11,0xff,0x40,0xef,0x0a,0x7b,0x5c,0x34,0x69,0x40};//{0xaa,0xbb,0xcc,0xdd,0xee,0x88,
+static uint8_t aes_key[16] = {0xf6,0x7f,0x7a,0x52,0x4d,0x55,0x11,0xff,0x40,0xef,0x0a,0x7b,0x5c,0x34,0x69,0x40};
+static uint8_t public_key[6] = {0xaa,0xbb,0xcc,0xdd,0xee,0x88};
 static uint8_t data_to_write[19]={0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0A,0x0B,0x0C,0x0D,0x0E,0x0F,0x10,0x00,0x00,0x00};
 static uint8_t decr_data[19];
 static uint8_t encr_data[19];
 static uint16_t char_handler = 0;
+static uint32_t rx_count = 0;
+static uint32_t tx_count = 0;
+static gboolean rx_error = FALSE;
+static gboolean tx_error = FALSE;
 struct characteristic_data {
 	GAttrib *attrib;
 	uint16_t start;
 	uint16_t end;
 };
+
+static enum state {
+	STATE_DISCONNECTED,
+	STATE_CONNECTING,
+	STATE_CONNECTED,
+	STATE_ERROR
+} conn_state;
+
+typedef enum pstate {
+	PSTATE_DISCONNECTED,
+	PSTATE_CONNECTING,
+	PSTATE_CONNECTED,
+	PSTATE_READ,
+	PSTATE_WRITE,
+	PSTATE_DISCONNECTING,
+	PSTATE_SCANNING,
+	PSTATE_ERROR,
+} proc_state;
+
+typedef enum perror {
+	ERROR_DISCONNECTED,
+	ERROR_CONNECTING,
+	ERROR_CONNECTED,
+	ERROR_READ,
+	ERROR_WRITE,
+	ERROR_DISCONNECTING,
+	ERROR_SCANNING,
+} proc_error;
+
+static proc_state pState = PSTATE_DISCONNECTED;
+
 static int get_smartphone_address(char* address);
 static gboolean characteristics(gpointer user_data);
 static gboolean characteristics_read(gpointer user_data);
 static gboolean characteristics_write_req(gpointer user_data);
-static enum state {
-	STATE_DISCONNECTED,
-	STATE_CONNECTING,
-	STATE_CONNECTED
+static gboolean bt_process(gpointer data);
 
-} conn_state;
 
 static void events_handler(const uint8_t *pdu, uint16_t len, gpointer user_data)
 {
@@ -119,7 +153,7 @@ static void events_handler(const uint8_t *pdu, uint16_t len, gpointer user_data)
 	size_t plen;
 
 	handle = get_le16(&pdu[1]);
-	g_print("Event LE: 0x%04x \n ", pdu[1]);
+	g_print("Event LE: 0x%04x \n ", pdu[0]);
 	switch (pdu[0]) {
 	case ATT_OP_HANDLE_NOTIFY:
 		g_print("Notification handle = 0x%04x value: ", handle);
@@ -250,8 +284,6 @@ static void primary_by_uuid_cb(uint8_t status, GSList *ranges, gpointer *user_da
 
 	operation(Attrib);
 
-
-
 }
 
 static gboolean primary(gpointer user_data)
@@ -268,7 +300,8 @@ char struuid[40];
 	else{
 		gatt_discover_primary(attrib, NULL, primary_all_cb, NULL);
 	}
-	operation = characteristics_read;
+	operation = characteristics;
+
 	return FALSE;
 }
 
@@ -291,12 +324,13 @@ static void char_discovered_cb(uint8_t status, GSList *characteristics,
 			opt_handle = chars->value_handle;
 			g_print("handle = 0x%04x, char properties = 0x%02x, char value "
 			"handle = 0x%04x, uuid = %s\n", chars->handle,
-			chars->properties, chars->value_handle, chars->uuid);
+			chars->properties, opt_handle, chars->uuid);
 
 		}
 
+
 	}
-	g_free(opt_uuid);
+ //	g_free(opt_uuid);
  //opt_uuid = NULL;
  operation(Attrib);
 
@@ -308,7 +342,7 @@ static gboolean characteristics(gpointer user_data)
 
 	gatt_discover_char(attrib, opt_start, opt_end, NULL,
 						char_discovered_cb, NULL);
-	operation = characteristics;
+	operation = characteristics_read;
 	return FALSE;
 }
 
@@ -322,21 +356,18 @@ static void char_read_cb(guint8 status, const guint8 *pdu, guint16 plen,
 	if (status != 0) {
 		g_printerr("Characteristic value/descriptor read failed: %s\n",
 							att_ecode2str(status));
-		g_main_loop_quit(event_loop);
+		//g_main_loop_quit(event_loop);
+		rx_error = TRUE;
 	}
 
 	vlen = dec_read_resp(pdu, plen, value, sizeof(value));
 	if (vlen < 0) {
 		g_printerr("Protocol error\n");
-		g_main_loop_quit(event_loop);
+		//g_main_loop_quit(event_loop);
+		rx_error = TRUE;
 	}
-	/*g_print("Characteristic value/descriptor: ");
-	for (i = 0; i < vlen; i++)
-		g_print("%02x ", value[i]);
-	g_print("\n");*/
+
 	memcpy(char_value,value,vlen);
-
-
 
 	readBufferTouint8((uint8_t*)&char_value[0]);
 
@@ -347,59 +378,25 @@ static void char_read_cb(guint8 status, const guint8 *pdu, guint16 plen,
 	//g_print("\n");
 	if(checkCRC16((uint8_t*)&decr_data[0],16)==1){
 		g_print(" :CRC OK\n");
+		rx_count++;
 	}else
-	{g_print( " :CRC not valid\r\n");}
+	{
+		rx_error = TRUE;
+		g_print( " :CRC not valid\r\n");
+
+	}
 
 	opt_value=char_value;
 	operation(Attrib);
 
 }
 
-static void char_read_by_uuid_cb(guint8 status, const guint8 *pdu,
-					guint16 plen, gpointer user_data)
-{
-	struct att_data_list *list;
-	int i;
 
-	if (status != 0) {
-		g_printerr("Read characteristics by UUID failed: %s\n",
-							att_ecode2str(status));
-		goto done;
-	}
-
-	list = dec_read_by_type_resp(pdu, plen);
-	if (list == NULL)
-		goto done;
-
-	for (i = 0; i < list->num; i++) {
-		uint8_t *value = list->data[i];
-		int j;
-
-		g_print("handle: 0x%04x \t value: ", get_le16(value));
-		value += 2;
-		for (j = 0; j < list->len - 2; j++, value++)
-			g_print("%02x ", *value);
-		g_print("\n");
-	}
-
-	att_data_list_free(list);
-
-done:
-	g_main_loop_quit(event_loop);
-}
 
 static gboolean characteristics_read(gpointer user_data)
 {
 	GAttrib *attrib = user_data;
 
-	/*if (opt_uuid != NULL) {
-
-		gatt_read_char_by_uuid(attrib, opt_start, opt_end, opt_uuid,
-						char_read_by_uuid_cb, NULL);
-
-		return FALSE;
-	}
-*/
 	if (opt_handle <= 0) {
 		g_printerr("A valid handle is required\n");
 		g_main_loop_quit(event_loop);
@@ -457,6 +454,7 @@ static void char_write_req_cb(guint8 status, const guint8 *pdu, guint16 plen,
 	if (status != 0) {
 		g_printerr("Characteristic Write Request failed: "
 						"%s\n", att_ecode2str(status));
+		tx_error = TRUE;
 		g_main_loop_quit(event_loop);
 	}
 
@@ -465,6 +463,7 @@ static void char_write_req_cb(guint8 status, const guint8 *pdu, guint16 plen,
 		g_main_loop_quit(event_loop);
 	}
 
+	tx_count++;
 	//g_print("Characteristic value was written successfully\n");
 
 	operation(Attrib);
@@ -484,28 +483,15 @@ static gboolean characteristics_write_req(gpointer user_data)
 		goto error;
 	}
 
-	/*if (opt_value == NULL || opt_value[0] == '\0') {
-		g_printerr("A value is required\n");
-		goto error;
-	}*/
 	uint16_t crc = crc16_clc((uint8_t*)&data_to_write[0], 14);
 	data_to_write[14]=(uint8_t)(crc&0x00FF);
 	data_to_write[15]=(uint8_t)((crc>>8)&0x00FF);
 	AES_ECB_encrypt(data_to_write,aes_key, encr_data, 16);
 	uint8TowriteBuffer((uint8_t*)&encr_data[0]);
-	/*len = gatt_attr_data_from_string(encr_data, &value);
-	if (len == 0) {
-		g_printerr("Invalid value\n");
-		goto error;
-	}*/
-
-
-
 
 	gatt_write_char(attrib, opt_handle, encr_data, 19, char_write_req_cb,
 									NULL);
 	operation = characteristics_read;
-
 	return FALSE;
 
 error:
@@ -639,35 +625,39 @@ static GOptionEntry options[] = {
 		"Set security level. Default: low", "[low | medium | high]"},
 	{ NULL },
 };
-
+static gboolean timer_callback(gpointer data)
+{
+  static guint16 i=0;
+  g_print("RX=%d ;TX=%d\n",rx_count, tx_count);
+  bt_process();
+  return TRUE;
+}
 
 int main(int argc, char *argv[])
 {
-char src[] = {'h','c','i','0'};
+
 	GOptionContext *context;
 	GOptionGroup *gatt_group, *params_group, *char_rw_group;
 	GError *gerr = NULL;
 
 	char address[18];
-	get_smartphone_address(address);
-	g_print("ARRIVAL %s\n", address);
-	opt_src = g_strdup("hci0");
-	opt_dst_type = g_strdup("random");
-	opt_sec_level = g_strdup("low");
+	char str_uuid[36];
 
-	char str_uuid[36];// ="77b7a422-5948-11e6-bdf4-0800200c9a66";
-	//bt_string_to_uuid(&charge_uuid, &str_uuid[0]);
 	static uint128_t charge_base_uuid = {
 		.data = {	0x77, 0xb7, 0xa4, 0x20, 0x59, 0x48, 0x11, 0xe6, 0xbd, 0xf4, 0x08, 0x00, 0x20, 0x0c, 0x9a, 0x66 }
 	};
 
 	charge_uuid.value.u128 = charge_base_uuid;
 	charge_uuid.type = BT_UUID128;
-	//char str_uuid[40];
+	/*Scanning for Smartphone*/
+	get_smartphone_address(address);
+
+	/*init params for connection*/
+	opt_src = g_strdup("hci0");
+	opt_dst_type = g_strdup("random");
+	opt_sec_level = g_strdup("low");
 	bt_uuid_to_string(&charge_uuid,&str_uuid[0],36);
-			{
-				g_print("\nUUID=%s\n",str_uuid);
-			}
+
 	opt_uuid = &charge_uuid;
 
 	opt_dst = &address[0];
@@ -703,14 +693,10 @@ char src[] = {'h','c','i','0'};
 	}
 
 
-	g_print("code-1\n");
-
 	if (opt_interactive) {
 		interactive(opt_src, opt_dst, opt_dst_type, opt_psm);
 		goto done;
 	}
-
-
 
 
 	if (opt_primary)
@@ -737,12 +723,14 @@ char src[] = {'h','c','i','0'};
 
 	connect_le();
 
+// Periodic timeout event init
+	g_timeout_add (1000,bt_process,NULL);
 
-
+// Init and Start main loop
 	event_loop = g_main_loop_new(NULL, FALSE);
-
 	g_main_loop_run(event_loop);
 
+	disconnect_io();
 	g_main_loop_unref(event_loop);
 
 done:
@@ -759,8 +747,120 @@ done:
 }
 
 
+
+static void accept_state(proc_state state)
+{
+    switch (state)
+    {
+    case PSTATE_DISCONNECTED:
+    				{
+
+    				}
+    				break;
+    		case PSTATE_CONNECTING:
+    				{
+
+    				}
+    				break;
+    		case PSTATE_CONNECTED:
+    				{
+
+    				}
+    				break;
+    		case PSTATE_READ:
+    				{
+
+    				}
+    				break;
+    		case PSTATE_WRITE:
+    				{
+
+    				}
+    				break;
+    		case PSTATE_DISCONNECTING:
+    				{
+
+    				}
+    				break;
+    		case PSTATE_SCANNING:
+    				{
+
+    				}
+    				break;
+    		case PSTATE_ERROR:
+    				{
+
+    				}
+    				break;
+    		default: break;
+    		}
+}
+static gboolean bt_process(gpointer data)
+{GError *err = NULL;
+	switch(pState){
+		case PSTATE_DISCONNECTED:
+				{
+					cmd_connect(1,NULL);
+					pState = PSTATE_CONNECTING;
+					accept_state(pState);
+				}
+				break;
+		case PSTATE_CONNECTING:
+				{
+					if(conn_state == STATE_CONNECTED){
+						pState = PSTATE_CONNECTED;
+					}
+					else{
+						connect_cb(iochannel,err,NULL);
+								if(err){
+									conn_state = STATE_DISCONNECTED;
+									pState = PSTATE_ERROR;
+								}
+					}
+					accept_state(pState);
+				}
+				break;
+		case PSTATE_CONNECTED:
+				{
+					cmd_char(1,NULL);
+					accept_state(pState);
+				}
+				break;
+		case PSTATE_READ:
+				{
+					accept_state(pState);
+				}
+				break;
+		case PSTATE_WRITE:
+				{
+					accept_state(pState);
+				}
+				break;
+		case PSTATE_DISCONNECTING:
+				{
+					accept_state(pState);
+				}
+				break;
+		case PSTATE_SCANNING:
+				{
+					accept_state(pState);
+				}
+				break;
+		case PSTATE_ERROR:
+				{
+					accept_state(pState);
+				}
+				break;
+		default: break;
+		}
+	}
+static bool validate_ble_dev(char* dev_public_key)
+{
+	return (0 == strncmp(dev_public_key,&public_key[0],6));
+	}
 static int get_smartphone_address(char* address)
-{ uint8_t uuid16[16] = {0x66,0x9a,0x0c,0x20,0x00,0x08,0xf4,0xbd,0xe6,0x11,0x48,0x59,0x20,0xa4,0xb7,0x77};
+{
+  uint8_t uuid16[16] = {0x66,0x9a,0x0c,0x20,0x00,0x08,0xf4,0xbd,0xe6,0x11,0x48,0x59,0x20,0xa4,0xb7,0x77};
   char *hciDeviceIdOverride = NULL;
   int hciDeviceId = 0;
   int hciSocket;
@@ -887,17 +987,20 @@ static int get_smartphone_address(char* address)
 
       leAdvertisingInfo = (le_advertising_info *)(leMetaEvent->data + 1);
      
- 	if (0 == strncmp(&leAdvertisingInfo->data[13],&uuid16[0],16)){ 
+ 	if ((0 == strncmp(&leAdvertisingInfo->data[13],&uuid16[0],16)) && validate_ble_dev(&leAdvertisingInfo->data[5])){
+
+
+
 		ba2str(&leAdvertisingInfo->bdaddr, address);
      	 	printf("event %s,%s,", address, (leAdvertisingInfo->bdaddr_type == LE_PUBLIC_ADDRESS) ? "public" : "random");
-
+/*
       		for (i = 0; i < leAdvertisingInfo->length; i++) {
           		printf("%02x", leAdvertisingInfo->data[i]);
       		}
-
+*/
       		rssi = *(leAdvertisingInfo->data + leAdvertisingInfo->length);
 
-      		printf(",%d\n", rssi);
+      		printf("%d\n", rssi);
 		// stop scan
         	scanning = 0;
 		state = 0;
